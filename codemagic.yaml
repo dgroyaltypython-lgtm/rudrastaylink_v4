@@ -1,0 +1,77 @@
+workflows:
+  rudra-staylink-debug-apk:
+    name: Rudra StayLink - Codemagic Debug APK
+    max_build_duration: 90
+    instance_type: mac_mini_m2
+    environment:
+      java: 17
+      vars:
+        PACKAGE_NAME: "com.rudradigital.rudrastaylink"
+    scripts:
+      - name: Locate project and configure Android SDK
+        script: |
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          echo "=== Rudra StayLink Codemagic build ==="
+          echo "Build directory: ${CM_BUILD_DIR}"
+          java -version
+          echo "Android SDK: ${ANDROID_SDK_ROOT:-${ANDROID_HOME:-not-set}}"
+
+          PROJECT_DIR="$CM_BUILD_DIR"
+          if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] || [ ! -f "$PROJECT_DIR/gradlew" ]; then
+            SETTINGS_FILE="$(find "$CM_BUILD_DIR" -maxdepth 5 -type f -name settings.gradle.kts -print -quit || true)"
+            if [ -z "$SETTINGS_FILE" ]; then
+              echo "ERROR: settings.gradle.kts was not found under the repository." >&2
+              find "$CM_BUILD_DIR" -maxdepth 5 -type f | sort | head -250
+              exit 1
+            fi
+            PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+          fi
+
+          test -f "$PROJECT_DIR/app/build.gradle.kts" || { echo "ERROR: app/build.gradle.kts is missing in $PROJECT_DIR" >&2; exit 1; }
+          test -f "$PROJECT_DIR/gradlew" || { echo "ERROR: gradlew is missing in $PROJECT_DIR" >&2; exit 1; }
+          SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          test -n "$SDK_DIR" || { echo "ERROR: Codemagic did not provide ANDROID_SDK_ROOT or ANDROID_HOME." >&2; exit 1; }
+
+          printf 'sdk.dir=%s\n' "$SDK_DIR" > "$PROJECT_DIR/local.properties"
+          chmod +x "$PROJECT_DIR/gradlew"
+          printf '%s\n' "$PROJECT_DIR" > "$CM_BUILD_DIR/.rudra-project-dir"
+          echo "Using Android project directory: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
+          "$PROJECT_DIR/gradlew" --version
+
+      - name: Verify pinned Compose and Coil dependencies
+        script: |
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          PROJECT_DIR="$(cat "$CM_BUILD_DIR/.rudra-project-dir")"
+          cd "$PROJECT_DIR"
+          ./gradlew --no-daemon --console=plain :app:dependencyInsight \
+            --dependency androidx.compose.runtime:runtime-saveable \
+            --configuration debugRuntimeClasspath 2>&1 | tee "$CM_BUILD_DIR/compose-dependency-debug.log"
+          ./gradlew --no-daemon --console=plain :app:dependencyInsight \
+            --dependency io.coil-kt.coil3:coil-compose \
+            --configuration debugRuntimeClasspath 2>&1 | tee "$CM_BUILD_DIR/coil-dependency-debug.log"
+
+      - name: Build installable debug APK in Codemagic
+        script: |
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          PROJECT_DIR="$(cat "$CM_BUILD_DIR/.rudra-project-dir")"
+          cd "$PROJECT_DIR"
+          ./gradlew --no-daemon --console=plain --stacktrace clean :app:assembleDebug 2>&1 | tee "$CM_BUILD_DIR/gradle-debug-build.log"
+
+          APK_PATH="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK_PATH" || { echo "ERROR: Debug APK was not created." >&2; exit 1; }
+          echo "=== Build succeeded: APK created ==="
+          ls -lh "$APK_PATH"
+          EXPORT_DIR="$CM_BUILD_DIR/codemagic-export"
+          mkdir -p "$EXPORT_DIR"
+          cp "$APK_PATH" "$EXPORT_DIR/RudraStayLink-debug.apk"
+    artifacts:
+      - "**/app/build/outputs/apk/debug/*.apk"
+      - "codemagic-export/*.apk"
+      - "gradle-debug-build.log"
+      - "compose-dependency-debug.log"
+      - "coil-dependency-debug.log"
+      - "**/app/build/reports/**"
